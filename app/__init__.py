@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 import csv, io, os, re, secrets
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -9,18 +9,59 @@ from .auth import current_user, login_user, logout_user, login, role_required, s
 
 ALLOWED_UPLOADS={'pdf','png','jpg','jpeg'}
 def create_app(test_config=None):
-    app=Flask(__name__, instance_relative_config=True)
-    app.config.from_mapping(SECRET_KEY=os.getenv('FLASK_SECRET_KEY','dev-only-change-me'), DATABASE_PATH=os.getenv('HUB_DATABASE_PATH',str(Path(app.instance_path)/'hub.db')), UPLOAD_DIR=os.getenv('HUB_UPLOAD_DIR',str(Path(app.instance_path)/'uploads')))
-    if test_config: app.config.update(test_config)
-    Path(app.config['UPLOAD_DIR']).mkdir(parents=True,exist_ok=True)
+    app = Flask(__name__, instance_relative_config=True)
+
+    database_url = os.getenv('DATABASE_URL')
+
+    if database_url and database_url.startswith('postgres://'):
+        database_url = database_url.replace('postgres://', 'postgresql://', 1)
+
+    app.config.from_mapping(
+        SECRET_KEY=os.getenv('FLASK_SECRET_KEY', 'dev-only-change-me'),
+        DATABASE_URL=database_url,
+        DATABASE_PATH=os.getenv(
+            'HUB_DATABASE_PATH',
+            str(Path(app.instance_path) / 'hub.db')
+        ),
+        UPLOAD_DIR=os.getenv(
+            'HUB_UPLOAD_DIR',
+            str(Path(app.instance_path) / 'uploads')
+        ),
+        SEED_DEMO_DATA=os.getenv(
+            'SEED_DEMO_DATA',
+            'true' if not database_url else 'false'
+        ).lower() == 'true'
+    )
+
+    if test_config:
+        app.config.update(test_config)
+
+    Path(app.config['UPLOAD_DIR']).mkdir(parents=True, exist_ok=True)
     app.teardown_appcontext(close_db)
-    with app.app_context(): init_db()
+
+    with app.app_context():
+        init_db()
+
     @app.context_processor
-    def inject(): return {'user':current_user(),'classes':rows('SELECT * FROM classes ORDER BY id'),'subjects':rows('SELECT * FROM subjects ORDER BY name'),'current_path':request.path}
+    def inject():
+        return {
+            'user': current_user(),
+            'classes': rows('SELECT * FROM classes ORDER BY id'),
+            'subjects': rows('SELECT * FROM subjects ORDER BY name'),
+            'current_path': request.path
+        }
+
     @app.get('/')
-    def home(): return redirect(url_for('dashboard')) if current_user() else render_template('landing.html')
+    def home():
+        return redirect(url_for('dashboard')) if current_user() else render_template('landing.html')
+
     @app.get('/health')
-    def health(): return jsonify({'ok':True,'service':'holiday-coaching-hub','database':'sqlite'})
+    def health():
+        return jsonify({
+            'ok': True,
+            'service': 'holiday-coaching-hub',
+            'database': 'postgresql' if app.config.get('DATABASE_URL') else 'sqlite'
+          })
     @app.get('/manus-routes.json')
     def route_manifest(): return jsonify({'routes':[{'path':'/','title':'Holiday Coaching Hub'},{'path':'/login','title':'Sign in'},{'path':'/dashboard','title':'Dashboard'},{'path':'/library','title':'Library'},{'path':'/timetable','title':'Timetable'},{'path':'/tests','title':'Assessments'},{'path':'/videos','title':'Video lessons'}]})
     @app.route('/login',methods=['GET','POST'])
@@ -70,10 +111,52 @@ def create_app(test_config=None):
     @app.post('/announcements')
     @staff_required
     def create_announcement():
-        db=get_db(); aid=db.execute('INSERT INTO announcements(title,body,target_level,target_class_id,publish_at,created_by,created_at) VALUES(?,?,?,?,?,?,?)',(request.form['title'],request.form['body'],request.form.get('target_level') or None,request.form.get('target_class_id') or None,now(),current_user()['id'],now())).lastrowid
-        targets=rows("SELECT id FROM users WHERE role='student' AND is_active=1")
-        for target in targets: db.execute('INSERT INTO notifications(user_id,announcement_id,message,created_at) VALUES(?,?,?,?)',(target['id'],aid,request.form['title'],now()))
-        db.commit(); audit(current_user()['id'],'announcement_published','announcement',str(aid)); flash('Announcement published to the in-app notice stream.','success'); return redirect(url_for('dashboard'))
+        db = get_db()
+
+        aid = db.execute(
+            """
+            INSERT INTO announcements
+            (title, body, target_level, target_class_id,
+             publish_at, created_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            RETURNING id
+            """,
+            (
+                request.form['title'],
+                request.form['body'],
+                request.form.get('target_level') or None,
+                request.form.get('target_class_id') or None,
+                now(),
+                current_user()['id'],
+                now()
+            )
+        ).fetchone()['id']
+
+        targets = rows(
+            "SELECT id FROM users WHERE role='student' AND is_active=1"
+        )
+
+        for target in targets:
+            db.execute(
+                """
+                INSERT INTO notifications
+                (user_id, announcement_id, message, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (target['id'], aid, request.form['title'], now())
+            )
+
+        db.commit()
+
+        audit(
+            current_user()['id'],
+            'announcement_published',
+            'announcement',
+            str(aid)
+        )
+
+        flash('Announcement published to the in-app notice stream.', 'success')
+        return redirect(url_for('dashboard'))
     @app.route('/library',methods=['GET','POST'])
     @role_required('admin','teacher','student')
     def library():
@@ -110,64 +193,377 @@ def create_app(test_config=None):
     @app.route('/timetable',methods=['GET','POST'])
     @role_required('admin','teacher','student')
     def timetable():
-        u=current_user(); profile=assigned_student() if u['role']=='student' else None
-        if request.method=='POST':
-            if u['role']=='student': abort(403)
-            db=get_db(); meet=request.form['meet_url'];
-            if not meet.startswith('https://meet.google.com/'): flash('Use a valid Google Meet URL.','error')
-            else: db.execute('INSERT INTO lessons(title,class_id,subject_id,teacher_id,starts_at,ends_at,meet_url,created_at) VALUES(?,?,?,?,?,?,?,?)',(request.form['title'],request.form['class_id'],request.form['subject_id'],u['id'],request.form['starts_at'],request.form['ends_at'],meet,now())); db.commit(); audit(u['id'],'lesson_created','lesson',str(db.execute('SELECT last_insert_rowid()').fetchone()[0])); flash('Lesson scheduled.','success')
-        lesson_rows=rows('SELECT l.*,c.name class_name,s.name subject_name,u.full_name teacher FROM lessons l JOIN classes c ON c.id=l.class_id JOIN subjects s ON s.id=l.subject_id LEFT JOIN users u ON u.id=l.teacher_id WHERE l.class_id=? ORDER BY l.starts_at',(profile['class_id'],)) if profile else rows('SELECT l.*,c.name class_name,s.name subject_name,u.full_name teacher FROM lessons l JOIN classes c ON c.id=l.class_id JOIN subjects s ON s.id=l.subject_id LEFT JOIN users u ON u.id=l.teacher_id ORDER BY l.starts_at')
-        return render_template('timetable.html',lessons=lesson_rows,profile=profile)
+        u = current_user()
+        profile = assigned_student() if u['role'] == 'student' else None
+
+        if request.method == 'POST':
+            if u['role'] == 'student':
+                abort(403)
+
+            db = get_db()
+            meet = request.form['meet_url']
+
+            if not meet.startswith('https://meet.google.com/'):
+                flash('Use a valid Google Meet URL.', 'error')
+            else:
+                lesson_id = db.execute(
+                    """
+                    INSERT INTO lessons
+                    (title, class_id, subject_id, teacher_id,
+                     starts_at, ends_at, meet_url, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    RETURNING id
+                    """,
+                    (
+                        request.form['title'],
+                        request.form['class_id'],
+                        request.form['subject_id'],
+                        u['id'],
+                        request.form['starts_at'],
+                        request.form['ends_at'],
+                        meet,
+                        now()
+                    )
+                ).fetchone()['id']
+
+                db.commit()
+                audit(u['id'], 'lesson_created', 'lesson', str(lesson_id))
+                flash('Lesson scheduled.', 'success')
+
+        if profile:
+            lesson_rows = rows(
+                """
+                SELECT l.*, c.name class_name, s.name subject_name,
+                       u.full_name teacher
+                FROM lessons l
+                JOIN classes c ON c.id = l.class_id
+                JOIN subjects s ON s.id = l.subject_id
+                LEFT JOIN users u ON u.id = l.teacher_id
+                WHERE l.class_id = ?
+                ORDER BY l.starts_at
+                """,
+                (profile['class_id'],)
+            )
+        else:
+            lesson_rows = rows(
+                """
+                SELECT l.*, c.name class_name, s.name subject_name,
+                       u.full_name teacher
+                FROM lessons l
+                JOIN classes c ON c.id = l.class_id
+                JOIN subjects s ON s.id = l.subject_id
+                LEFT JOIN users u ON u.id = l.teacher_id
+                ORDER BY l.starts_at
+                """
+            )
+
+        return render_template(
+            'timetable.html',
+            lessons=lesson_rows,
+            profile=profile
+        )
     @app.route('/tests',methods=['GET','POST'])
     @role_required('admin','teacher','student')
     def tests():
-        u=current_user(); profile=assigned_student() if u['role']=='student' else None
-        if request.method=='POST':
-            if u['role']=='student': abort(403)
-            db=get_db(); tid=db.execute('INSERT INTO tests(title,instructions,class_id,subject_id,topic,opens_at,closes_at,max_marks,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(request.form['title'],request.form['instructions'],request.form['class_id'],request.form['subject_id'],request.form['topic'],request.form['opens_at'],request.form['closes_at'],request.form['max_marks'],u['id'],now())).lastrowid
-            questions=[request.form.get('question_1',''),request.form.get('question_2',''),request.form.get('question_3','')]
-            for i,text in enumerate(questions,1):
-                if text.strip(): db.execute('INSERT INTO questions(test_id,question_number,question_text,marks,answer_type) VALUES(?,?,?,?,?)',(tid,i,text,request.form.get(f'marks_{i}',1),'long'))
-            db.commit(); audit(u['id'],'test_created','test',str(tid)); flash('Written test created.','success'); return redirect(url_for('tests'))
-        ts=rows('SELECT t.*,c.name class_name,s.name subject_name FROM tests t JOIN classes c ON c.id=t.class_id JOIN subjects s ON s.id=t.subject_id '+('WHERE t.class_id=? ' if profile else '')+'ORDER BY t.closes_at', (profile['class_id'],) if profile else ())
-        return render_template('tests.html',tests=ts,profile=profile)
+        u = current_user()
+        profile = assigned_student() if u['role'] == 'student' else None
+
+        if request.method == 'POST':
+            if u['role'] == 'student':
+                abort(403)
+
+            db = get_db()
+
+            tid = db.execute(
+                """
+                INSERT INTO tests
+                (title, instructions, class_id, subject_id, topic,
+                 opens_at, closes_at, max_marks, created_by, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                RETURNING id
+                """,
+                (
+                    request.form['title'],
+                    request.form['instructions'],
+                    request.form['class_id'],
+                    request.form['subject_id'],
+                    request.form['topic'],
+                    request.form['opens_at'],
+                    request.form['closes_at'],
+                    request.form['max_marks'],
+                    u['id'],
+                    now()
+                )
+            ).fetchone()['id']
+
+            questions = [
+                request.form.get('question_1', ''),
+                request.form.get('question_2', ''),
+                request.form.get('question_3', '')
+            ]
+
+            for i, question_text in enumerate(questions, 1):
+                if question_text.strip():
+                    db.execute(
+                        """
+                        INSERT INTO questions
+                        (test_id, question_number, question_text, marks, answer_type)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (tid, i, question_text, request.form.get(f'marks_{i}', 1), 'long')
+                    )
+
+            db.commit()
+            audit(u['id'], 'test_created', 'test', str(tid))
+            flash('Written test created.', 'success')
+            return redirect(url_for('tests'))
+
+        ts = rows(
+            """
+            SELECT t.*, c.name class_name, s.name subject_name
+            FROM tests t
+            JOIN classes c ON c.id = t.class_id
+            JOIN subjects s ON s.id = t.subject_id
+            """ + ('WHERE t.class_id=? ' if profile else '') + 'ORDER BY t.closes_at',
+            (profile['class_id'],) if profile else ()
+        )
+
+        return render_template('tests.html', tests=ts, profile=profile)
     @app.route('/test/<int:test_id>',methods=['GET','POST'])
     @student_required
     def take_test(test_id):
-        t=row('SELECT t.*,c.name class_name,s.name subject_name FROM tests t JOIN classes c ON c.id=t.class_id JOIN subjects s ON s.id=t.subject_id WHERE t.id=?',(test_id,)); assigned_student(class_id=t['class_id'] if t else -1); qs=rows('SELECT * FROM questions WHERE test_id=? ORDER BY question_number',(test_id,)); db=get_db(); sub=row('SELECT * FROM submissions WHERE test_id=? AND student_id=?',(test_id,current_user()['id']))
-        if request.method=='POST':
-            if sub and sub['status']=='Submitted': flash('This script is already submitted and locked.','error')
+        t = row(
+            """
+            SELECT t.*, c.name class_name, s.name subject_name
+            FROM tests t
+            JOIN classes c ON c.id = t.class_id
+            JOIN subjects s ON s.id = t.subject_id
+            WHERE t.id = ?
+            """,
+            (test_id,)
+        )
+
+        assigned_student(class_id=t['class_id'] if t else -1)
+
+        qs = rows(
+            'SELECT * FROM questions WHERE test_id=? ORDER BY question_number',
+            (test_id,)
+        )
+
+        db = get_db()
+        sub = row(
+            'SELECT * FROM submissions WHERE test_id=? AND student_id=?',
+            (test_id, current_user()['id'])
+        )
+
+        if request.method == 'POST':
+            if sub and sub['status'] == 'Submitted':
+                flash('This script is already submitted and locked.', 'error')
             else:
-                if not sub: sid=db.execute('INSERT INTO submissions(test_id,student_id,status,updated_at) VALUES(?,?,?,?)',(test_id,current_user()['id'],'Draft',now())).lastrowid
-                else: sid=sub['id']
-                for q in qs: db.execute('INSERT INTO answers(submission_id,question_id,answer_text) VALUES(?,?,?) ON CONFLICT(submission_id,question_id) DO UPDATE SET answer_text=excluded.answer_text',(sid,q['id'],request.form.get(f"answer_{q['id']}",'')))
-                status='Submitted' if request.form.get('action')=='submit' else 'Draft'; db.execute('UPDATE submissions SET status=?,submitted_at=?,updated_at=? WHERE id=?',(status,now() if status=='Submitted' else None,now(),sid)); db.commit(); audit(current_user()['id'],f'test_{status.lower()}','submission',str(sid)); flash('Script submitted and locked.' if status=='Submitted' else 'Draft saved.','success')
-                sub=row('SELECT * FROM submissions WHERE id=?',(sid,))
-        answers={x['question_id']:x['answer_text'] for x in rows('SELECT * FROM answers WHERE submission_id=?',(sub['id'],))} if sub else {}; return render_template('take_test.html',test=t,questions=qs,submission=sub,answers=answers)
+                if not sub:
+                    sid = db.execute(
+                        """
+                        INSERT INTO submissions
+                        (test_id, student_id, status, updated_at)
+                        VALUES (?, ?, ?, ?)
+                        RETURNING id
+                        """,
+                        (test_id, current_user()['id'], 'Draft', now())
+                    ).fetchone()['id']
+                else:
+                    sid = sub['id']
+
+                for q in qs:
+                    db.execute(
+                        """
+                        INSERT INTO answers
+                        (submission_id, question_id, answer_text)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(submission_id, question_id)
+                        DO UPDATE SET answer_text=excluded.answer_text
+                        """,
+                        (sid, q['id'], request.form.get(f"answer_{q['id']}", ''))
+                    )
+
+                status = 'Submitted' if request.form.get('action') == 'submit' else 'Draft'
+
+                db.execute(
+                    """
+                    UPDATE submissions
+                    SET status=?, submitted_at=?, updated_at=?
+                    WHERE id=?
+                    """,
+                    (status, now() if status == 'Submitted' else None, now(), sid)
+                )
+
+                db.commit()
+                audit(
+                    current_user()['id'],
+                    f'test_{status.lower()}',
+                    'submission',
+                    str(sid)
+                )
+
+                flash(
+                    'Script submitted and locked.' if status == 'Submitted' else 'Draft saved.',
+                    'success'
+                )
+
+                sub = row('SELECT * FROM submissions WHERE id=?', (sid,))
+
+        answers = {
+            x['question_id']: x['answer_text']
+            for x in rows('SELECT * FROM answers WHERE submission_id=?', (sub['id'],))
+        } if sub else {}
+
+        return render_template(
+            'take_test.html',
+            test=t,
+            questions=qs,
+            submission=sub,
+            answers=answers
+        )
     @app.get('/marking')
     @staff_required
     def marking(): return render_template('marking.html',submissions=rows("SELECT s.*,t.title test_title,u.full_name student,c.name class_name FROM submissions s JOIN tests t ON t.id=s.test_id JOIN users u ON u.id=s.student_id JOIN student_profiles sp ON sp.user_id=u.id JOIN classes c ON c.id=sp.class_id WHERE s.status='Submitted' ORDER BY s.submitted_at"))
     @app.route('/mark/<int:submission_id>',methods=['GET','POST'])
     @staff_required
     def mark(submission_id):
-        sub=row('SELECT s.*,t.title test_title,t.max_marks,u.full_name student FROM submissions s JOIN tests t ON t.id=s.test_id JOIN users u ON u.id=s.student_id WHERE s.id=?',(submission_id,)); qs=rows('SELECT q.*,a.answer_text FROM questions q LEFT JOIN answers a ON a.question_id=q.id AND a.submission_id=? WHERE q.test_id=? ORDER BY q.question_number',(submission_id,sub['test_id']))
-        if request.method=='POST':
-            db=get_db()
-            for q in qs: db.execute('INSERT INTO marks(submission_id,question_id,marks_awarded,teacher_comment,marked_by,released_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING',(submission_id,q['id'],float(request.form.get(f"mark_{q['id']}",0)),request.form.get(f"comment_{q['id']}",''),current_user()['id'],now()))
-            db.execute('UPDATE tests SET results_released=1 WHERE id=?',(sub['test_id'],)); db.commit(); audit(current_user()['id'],'marks_released','submission',str(submission_id)); flash('Marks saved and released.','success'); return redirect(url_for('marking'))
-        return render_template('mark.html',submission=sub,questions=qs)
+        sub = row(
+            """
+            SELECT s.*, t.title test_title, t.max_marks, u.full_name student
+            FROM submissions s
+            JOIN tests t ON t.id = s.test_id
+            JOIN users u ON u.id = s.student_id
+            WHERE s.id = ?
+            """,
+            (submission_id,)
+        )
+
+        if not sub:
+            abort(404)
+
+        qs = rows(
+            """
+            SELECT q.*, a.answer_text
+            FROM questions q
+            LEFT JOIN answers a
+                ON a.question_id = q.id AND a.submission_id = ?
+            WHERE q.test_id = ?
+            ORDER BY q.question_number
+            """,
+            (submission_id, sub['test_id'])
+        )
+
+        if request.method == 'POST':
+            db = get_db()
+
+            for q in qs:
+                db.execute(
+                    """
+                    INSERT INTO marks
+                    (submission_id, question_id, marks_awarded,
+                     teacher_comment, marked_by, released_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(submission_id, question_id)
+                    DO UPDATE SET
+                        marks_awarded = excluded.marks_awarded,
+                        teacher_comment = excluded.teacher_comment,
+                        marked_by = excluded.marked_by,
+                        released_at = excluded.released_at
+                    """,
+                    (
+                        submission_id,
+                        q['id'],
+                        float(request.form.get(f"mark_{q['id']}", 0)),
+                        request.form.get(f"comment_{q['id']}", ''),
+                        current_user()['id'],
+                        now()
+                    )
+                )
+
+            db.execute(
+                'UPDATE tests SET results_released=1 WHERE id=?',
+                (sub['test_id'],)
+            )
+
+            db.commit()
+            audit(
+                current_user()['id'],
+                'marks_released',
+                'submission',
+                str(submission_id)
+            )
+            flash('Marks saved and released.', 'success')
+            return redirect(url_for('marking'))
+
+        return render_template('mark.html', submission=sub, questions=qs)
     @app.route('/videos',methods=['GET','POST'])
     @role_required('admin','teacher','student')
     def videos():
-        u=current_user(); profile=assigned_student() if u['role']=='student' else None
-        if request.method=='POST':
-            if u['role']=='student': abort(403)
-            url=request.form['youtube_url']
-            if not re.match(r'https://(www\.)?youtube\.com/watch\?v=|https://youtu\.be/',url): flash('Use an official YouTube watch or youtu.be URL.','error')
+        u = current_user()
+        profile = assigned_student() if u['role'] == 'student' else None
+
+        if request.method == 'POST':
+            if u['role'] == 'student':
+                abort(403)
+
+            url = request.form['youtube_url']
+
+            if not re.match(r'https://(www\.)?youtube\.com/watch\?v=|https://youtu\.be/', url):
+                flash('Use an official YouTube watch or youtu.be URL.', 'error')
             else:
-                db=get_db(); db.execute('INSERT INTO videos(title,description,youtube_url,class_id,subject_id,topic,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)',(request.form['title'],request.form.get('description',''),url,request.form['class_id'],request.form['subject_id'],request.form['topic'],u['id'],now())); db.commit(); audit(u['id'],'video_added','video',str(db.execute('SELECT last_insert_rowid()').fetchone()[0])); flash('YouTube lesson added.','success'); return redirect(url_for('videos'))
-        vs=rows('SELECT v.*,c.name class_name,s.name subject_name FROM videos v JOIN classes c ON c.id=v.class_id JOIN subjects s ON s.id=v.subject_id '+('WHERE v.class_id=? ' if profile else '')+'ORDER BY v.id DESC',(profile['class_id'],) if profile else ())
-        return render_template('videos.html',videos=vs)
+                db = get_db()
+
+                video_id = db.execute(
+                    """
+                    INSERT INTO videos
+                    (title, description, youtube_url, class_id,
+                     subject_id, topic, created_by, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    RETURNING id
+                    """,
+                    (
+                        request.form['title'],
+                        request.form.get('description', ''),
+                        url,
+                        request.form['class_id'],
+                        request.form['subject_id'],
+                        request.form['topic'],
+                        u['id'],
+                        now()
+                    )
+                ).fetchone()['id']
+
+                db.commit()
+                audit(u['id'], 'video_added', 'video', str(video_id))
+                flash('YouTube lesson added.', 'success')
+                return redirect(url_for('videos'))
+
+        if profile:
+            vs = rows(
+                """
+                SELECT v.*, c.name class_name, s.name subject_name
+                FROM videos v
+                JOIN classes c ON c.id = v.class_id
+                JOIN subjects s ON s.id = v.subject_id
+                WHERE v.class_id = ?
+                ORDER BY v.id DESC
+                """,
+                (profile['class_id'],)
+            )
+        else:
+            vs = rows(
+                """
+                SELECT v.*, c.name class_name, s.name subject_name
+                FROM videos v
+                JOIN classes c ON c.id = v.class_id
+                JOIN subjects s ON s.id = v.subject_id
+                ORDER BY v.id DESC
+                """
+            )
+
+        return render_template('videos.html', videos=vs)
     @app.get('/audit')
     @admin_required
     def audit_page(): return render_template('audit.html',logs=rows('SELECT a.*,u.full_name actor FROM audit_logs a LEFT JOIN users u ON u.id=a.actor_id ORDER BY a.id DESC LIMIT 100'))
