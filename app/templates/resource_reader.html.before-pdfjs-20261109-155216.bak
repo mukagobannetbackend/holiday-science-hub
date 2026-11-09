@@ -1,0 +1,33 @@
+{% extends 'base.html' %}
+{% block title %}{{ resource.title }} ? Learning Reader{% endblock %}
+{% block content %}
+<div class="reader-page">
+    <div class="reader-heading">
+        <div>
+            <span class="eyebrow">SCIENCE HOLIDAY COACHING HUB ? E-LIBRARY</span>
+            <h1>{{ resource.title }}</h1>
+            <p>{{ resource.class_name }} ? {{ resource.subject_name }} ? {{ resource.topic }}</p>
+        </div>
+        <a class="btn ghost" href="{{ url_for('library') }}">? Back to Library</a>
+    </div>
+
+    {% if mimetype.startswith('image/') %}
+        <div class="reader-image">
+            <img src="{{ url_for('view_resource', resource_id=resource.id) }}"
+                 alt="{{ resource.title }}">
+        </div>
+    {% else %}
+        <div class="reader-toolbar">
+            <span>Reading mode</span>
+            <a class="btn tiny" href="{{ url_for('view_resource', resource_id=resource.id) }}"
+               target="_blank" rel="noopener">Open PDF separately</a>
+        </div>
+        <div class="reader-document">
+            <iframe
+                src="{{ url_for('view_resource', resource_id=resource.id) }}#toolbar=1&navpanes=0&view=FitH"
+                title="{{ resource.title }} PDF reader">
+            </iframe>
+        </div>
+    {% endif %}
+</div>
+{% endblock %}

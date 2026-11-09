@@ -20,7 +20,7 @@ def role_required(*roles):
         @wraps(fn)
         def wrapped(*args,**kwargs):
             user=current_user()
-            if not user: return redirect(url_for('login', next=request.path))
+            if not user: return redirect(url_for('login_view', next=request.path))
             if user['role'] not in roles: abort(403)
             if user['must_change_password'] and request.endpoint not in {'change_password','logout'}: return redirect(url_for('change_password'))
             return fn(*args,**kwargs)

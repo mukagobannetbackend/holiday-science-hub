@@ -29,7 +29,7 @@ def create_app(test_config=None):
         ),
         SEED_DEMO_DATA=os.getenv(
             'SEED_DEMO_DATA',
-            'true' if not database_url else 'false'
+            'false'
         ).lower() == 'true'
     )
 
@@ -332,40 +332,238 @@ def create_app(test_config=None):
     @app.route('/test/<int:test_id>',methods=['GET','POST'])
     @student_required
     def take_test(test_id):
-        t=row('SELECT t.*,c.name class_name,s.name subject_name FROM tests t JOIN classes c ON c.id=t.class_id JOIN subjects s ON s.id=t.subject_id WHERE t.id=?',(test_id,)); assigned_student(class_id=t['class_id'] if t else -1); qs=rows('SELECT * FROM questions WHERE test_id=? ORDER BY question_number',(test_id,)); db=get_db(); sub=row('SELECT * FROM submissions WHERE test_id=? AND student_id=?',(test_id,current_user()['id']))
-        if request.method=='POST':
-            if sub and sub['status']=='Submitted': flash('This script is already submitted and locked.','error')
+        t = row(
+            """
+            SELECT t.*, c.name class_name, s.name subject_name
+            FROM tests t
+            JOIN classes c ON c.id = t.class_id
+            JOIN subjects s ON s.id = t.subject_id
+            WHERE t.id = ?
+            """,
+            (test_id,)
+        )
+
+        assigned_student(class_id=t['class_id'] if t else -1)
+
+        qs = rows(
+            'SELECT * FROM questions WHERE test_id=? ORDER BY question_number',
+            (test_id,)
+        )
+
+        db = get_db()
+        sub = row(
+            'SELECT * FROM submissions WHERE test_id=? AND student_id=?',
+            (test_id, current_user()['id'])
+        )
+
+        if request.method == 'POST':
+            if sub and sub['status'] == 'Submitted':
+                flash('This script is already submitted and locked.', 'error')
             else:
-                if not sub: sid=db.execute('INSERT INTO submissions(test_id,student_id,status,updated_at) VALUES(?,?,?,?)',(test_id,current_user()['id'],'Draft',now())).lastrowid
-                else: sid=sub['id']
-                for q in qs: db.execute('INSERT INTO answers(submission_id,question_id,answer_text) VALUES(?,?,?) ON CONFLICT(submission_id,question_id) DO UPDATE SET answer_text=excluded.answer_text',(sid,q['id'],request.form.get(f"answer_{q['id']}",'')))
-                status='Submitted' if request.form.get('action')=='submit' else 'Draft'; db.execute('UPDATE submissions SET status=?,submitted_at=?,updated_at=? WHERE id=?',(status,now() if status=='Submitted' else None,now(),sid)); db.commit(); audit(current_user()['id'],f'test_{status.lower()}','submission',str(sid)); flash('Script submitted and locked.' if status=='Submitted' else 'Draft saved.','success')
-                sub=row('SELECT * FROM submissions WHERE id=?',(sid,))
-        answers={x['question_id']:x['answer_text'] for x in rows('SELECT * FROM answers WHERE submission_id=?',(sub['id'],))} if sub else {}; return render_template('take_test.html',test=t,questions=qs,submission=sub,answers=answers)
+                if not sub:
+                    sid = db.execute(
+                        """
+                        INSERT INTO submissions
+                        (test_id, student_id, status, updated_at)
+                        VALUES (?, ?, ?, ?)
+                        RETURNING id
+                        """,
+                        (test_id, current_user()['id'], 'Draft', now())
+                    ).fetchone()['id']
+                else:
+                    sid = sub['id']
+
+                for q in qs:
+                    db.execute(
+                        """
+                        INSERT INTO answers
+                        (submission_id, question_id, answer_text)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(submission_id, question_id)
+                        DO UPDATE SET answer_text=excluded.answer_text
+                        """,
+                        (sid, q['id'], request.form.get(f"answer_{q['id']}", ''))
+                    )
+
+                status = 'Submitted' if request.form.get('action') == 'submit' else 'Draft'
+
+                db.execute(
+                    """
+                    UPDATE submissions
+                    SET status=?, submitted_at=?, updated_at=?
+                    WHERE id=?
+                    """,
+                    (status, now() if status == 'Submitted' else None, now(), sid)
+                )
+
+                db.commit()
+                audit(
+                    current_user()['id'],
+                    f'test_{status.lower()}',
+                    'submission',
+                    str(sid)
+                )
+
+                flash(
+                    'Script submitted and locked.' if status == 'Submitted' else 'Draft saved.',
+                    'success'
+                )
+
+                sub = row('SELECT * FROM submissions WHERE id=?', (sid,))
+
+        answers = {
+            x['question_id']: x['answer_text']
+            for x in rows('SELECT * FROM answers WHERE submission_id=?', (sub['id'],))
+        } if sub else {}
+
+        return render_template(
+            'take_test.html',
+            test=t,
+            questions=qs,
+            submission=sub,
+            answers=answers
+        )
     @app.get('/marking')
     @staff_required
     def marking(): return render_template('marking.html',submissions=rows("SELECT s.*,t.title test_title,u.full_name student,c.name class_name FROM submissions s JOIN tests t ON t.id=s.test_id JOIN users u ON u.id=s.student_id JOIN student_profiles sp ON sp.user_id=u.id JOIN classes c ON c.id=sp.class_id WHERE s.status='Submitted' ORDER BY s.submitted_at"))
     @app.route('/mark/<int:submission_id>',methods=['GET','POST'])
     @staff_required
     def mark(submission_id):
-        sub=row('SELECT s.*,t.title test_title,t.max_marks,u.full_name student FROM submissions s JOIN tests t ON t.id=s.test_id JOIN users u ON u.id=s.student_id WHERE s.id=?',(submission_id,)); qs=rows('SELECT q.*,a.answer_text FROM questions q LEFT JOIN answers a ON a.question_id=q.id AND a.submission_id=? WHERE q.test_id=? ORDER BY q.question_number',(submission_id,sub['test_id']))
-        if request.method=='POST':
-            db=get_db()
-            for q in qs: db.execute('INSERT INTO marks(submission_id,question_id,marks_awarded,teacher_comment,marked_by,released_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING',(submission_id,q['id'],float(request.form.get(f"mark_{q['id']}",0)),request.form.get(f"comment_{q['id']}",''),current_user()['id'],now()))
-            db.execute('UPDATE tests SET results_released=1 WHERE id=?',(sub['test_id'],)); db.commit(); audit(current_user()['id'],'marks_released','submission',str(submission_id)); flash('Marks saved and released.','success'); return redirect(url_for('marking'))
-        return render_template('mark.html',submission=sub,questions=qs)
+        sub = row(
+            """
+            SELECT s.*, t.title test_title, t.max_marks, u.full_name student
+            FROM submissions s
+            JOIN tests t ON t.id = s.test_id
+            JOIN users u ON u.id = s.student_id
+            WHERE s.id = ?
+            """,
+            (submission_id,)
+        )
+
+        if not sub:
+            abort(404)
+
+        qs = rows(
+            """
+            SELECT q.*, a.answer_text
+            FROM questions q
+            LEFT JOIN answers a
+                ON a.question_id = q.id AND a.submission_id = ?
+            WHERE q.test_id = ?
+            ORDER BY q.question_number
+            """,
+            (submission_id, sub['test_id'])
+        )
+
+        if request.method == 'POST':
+            db = get_db()
+
+            for q in qs:
+                db.execute(
+                    """
+                    INSERT INTO marks
+                    (submission_id, question_id, marks_awarded,
+                     teacher_comment, marked_by, released_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(submission_id, question_id)
+                    DO UPDATE SET
+                        marks_awarded = excluded.marks_awarded,
+                        teacher_comment = excluded.teacher_comment,
+                        marked_by = excluded.marked_by,
+                        released_at = excluded.released_at
+                    """,
+                    (
+                        submission_id,
+                        q['id'],
+                        float(request.form.get(f"mark_{q['id']}", 0)),
+                        request.form.get(f"comment_{q['id']}", ''),
+                        current_user()['id'],
+                        now()
+                    )
+                )
+
+            db.execute(
+                'UPDATE tests SET results_released=1 WHERE id=?',
+                (sub['test_id'],)
+            )
+
+            db.commit()
+            audit(
+                current_user()['id'],
+                'marks_released',
+                'submission',
+                str(submission_id)
+            )
+            flash('Marks saved and released.', 'success')
+            return redirect(url_for('marking'))
+
+        return render_template('mark.html', submission=sub, questions=qs)
     @app.route('/videos',methods=['GET','POST'])
     @role_required('admin','teacher','student')
     def videos():
-        u=current_user(); profile=assigned_student() if u['role']=='student' else None
-        if request.method=='POST':
-            if u['role']=='student': abort(403)
-            url=request.form['youtube_url']
-            if not re.match(r'https://(www\.)?youtube\.com/watch\?v=|https://youtu\.be/',url): flash('Use an official YouTube watch or youtu.be URL.','error')
+        u = current_user()
+        profile = assigned_student() if u['role'] == 'student' else None
+
+        if request.method == 'POST':
+            if u['role'] == 'student':
+                abort(403)
+
+            url = request.form['youtube_url']
+
+            if not re.match(r'https://(www\.)?youtube\.com/watch\?v=|https://youtu\.be/', url):
+                flash('Use an official YouTube watch or youtu.be URL.', 'error')
             else:
-                db=get_db(); db.execute('INSERT INTO videos(title,description,youtube_url,class_id,subject_id,topic,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)',(request.form['title'],request.form.get('description',''),url,request.form['class_id'],request.form['subject_id'],request.form['topic'],u['id'],now())); db.commit(); audit(u['id'],'video_added','video',str(db.execute('SELECT last_insert_rowid()').fetchone()[0])); flash('YouTube lesson added.','success'); return redirect(url_for('videos'))
-        vs=rows('SELECT v.*,c.name class_name,s.name subject_name FROM videos v JOIN classes c ON c.id=v.class_id JOIN subjects s ON s.id=v.subject_id '+('WHERE v.class_id=? ' if profile else '')+'ORDER BY v.id DESC',(profile['class_id'],) if profile else ())
-        return render_template('videos.html',videos=vs)
+                db = get_db()
+
+                video_id = db.execute(
+                    """
+                    INSERT INTO videos
+                    (title, description, youtube_url, class_id,
+                     subject_id, topic, created_by, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    RETURNING id
+                    """,
+                    (
+                        request.form['title'],
+                        request.form.get('description', ''),
+                        url,
+                        request.form['class_id'],
+                        request.form['subject_id'],
+                        request.form['topic'],
+                        u['id'],
+                        now()
+                    )
+                ).fetchone()['id']
+
+                db.commit()
+                audit(u['id'], 'video_added', 'video', str(video_id))
+                flash('YouTube lesson added.', 'success')
+                return redirect(url_for('videos'))
+
+        if profile:
+            vs = rows(
+                """
+                SELECT v.*, c.name class_name, s.name subject_name
+                FROM videos v
+                JOIN classes c ON c.id = v.class_id
+                JOIN subjects s ON s.id = v.subject_id
+                WHERE v.class_id = ?
+                ORDER BY v.id DESC
+                """,
+                (profile['class_id'],)
+            )
+        else:
+            vs = rows(
+                """
+                SELECT v.*, c.name class_name, s.name subject_name
+                FROM videos v
+                JOIN classes c ON c.id = v.class_id
+                JOIN subjects s ON s.id = v.subject_id
+                ORDER BY v.id DESC
+                """
+            )
+
+        return render_template('videos.html', videos=vs)
     @app.get('/audit')
     @admin_required
     def audit_page(): return render_template('audit.html',logs=rows('SELECT a.*,u.full_name actor FROM audit_logs a LEFT JOIN users u ON u.id=a.actor_id ORDER BY a.id DESC LIMIT 100'))

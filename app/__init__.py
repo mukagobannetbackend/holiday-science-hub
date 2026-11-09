@@ -1,9 +1,10 @@
 ﻿from __future__ import annotations
-import csv, io, os, re, secrets
+import csv, io, os, re, secrets, mimetypes
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from flask import Flask, render_template, request, redirect, url_for, session, flash, abort, send_file, jsonify
 from werkzeug.utils import secure_filename
+from werkzeug.security import generate_password_hash
 from .db import init_db, close_db, get_db, row, rows, now, audit
 from .auth import current_user, login_user, logout_user, login, role_required, student_required, staff_required, admin_required, assigned_student, set_password
 
@@ -29,7 +30,7 @@ def create_app(test_config=None):
         ),
         SEED_DEMO_DATA=os.getenv(
             'SEED_DEMO_DATA',
-            'true' if not database_url else 'false'
+            'false'
         ).lower() == 'true'
     )
 
@@ -97,17 +98,226 @@ def create_app(test_config=None):
             return render_template('student_dashboard.html',profile=profile,upcoming=upcoming,notices=notices,tests=tests,resources=resources)
         stats={'students':row("SELECT COUNT(*) n FROM users WHERE role='student'")['n'],'pending':row("SELECT COUNT(*) n FROM payments WHERE status='Pending'")['n'],'approved':row("SELECT COUNT(*) n FROM payments WHERE status='Approved/Paid'")['n'],'lessons':row("SELECT COUNT(*) n FROM lessons WHERE status='Scheduled'")['n'],'marking':row("SELECT COUNT(*) n FROM submissions WHERE status='Submitted'")['n']}
         return render_template('staff_dashboard.html',stats=stats,pending=rows("SELECT p.*,u.full_name,c.name class_name FROM payments p JOIN users u ON u.id=p.student_id LEFT JOIN student_profiles sp ON sp.user_id=u.id LEFT JOIN classes c ON c.id=sp.class_id WHERE p.status='Pending' ORDER BY p.id DESC LIMIT 8"),lessons=rows('SELECT l.*,c.name class_name,s.name subject_name FROM lessons l JOIN classes c ON c.id=l.class_id JOIN subjects s ON s.id=l.subject_id ORDER BY l.starts_at LIMIT 6'))
+
     @app.get('/students')
     @admin_required
-    def students(): return render_template('students.html',students=rows("SELECT u.*,sp.admission_no,c.name class_name,c.level,p.status payment_status,p.reference FROM users u LEFT JOIN student_profiles sp ON sp.user_id=u.id LEFT JOIN classes c ON c.id=sp.class_id LEFT JOIN payments p ON p.student_id=u.id WHERE u.role='student' ORDER BY u.full_name"))
+    def students():
+        student_rows = rows("""
+            SELECT u.*, sp.admission_no, c.name AS class_name,
+                   c.level, p.status AS payment_status,
+                   p.reference
+            FROM users u
+            LEFT JOIN student_profiles sp ON sp.user_id = u.id
+            LEFT JOIN classes c ON c.id = sp.class_id
+            LEFT JOIN payments p ON p.id = (
+                SELECT id FROM payments
+                WHERE student_id = u.id
+                ORDER BY id DESC LIMIT 1
+            )
+            WHERE u.role = 'student'
+            ORDER BY u.full_name
+        """)
+        return render_template(
+            'students.html',
+            students=student_rows,
+            classes=rows("SELECT id, level, name FROM classes ORDER BY id")
+        )
+
+    @app.post('/students/register')
+    @admin_required
+    def register_student():
+        full_name = request.form.get('full_name', '').strip()
+        email = request.form.get('email', '').strip().lower()
+        phone = request.form.get('phone', '').strip()
+        guardian_contact = request.form.get('guardian_contact', '').strip()
+        admission_no = request.form.get('admission_no', '').strip()
+        reference = request.form.get('reference', '').strip()
+        password = request.form.get('temporary_password', '')
+        amount_text = request.form.get('amount', '').strip()
+
+        try:
+            class_id = int(request.form.get('class_id', ''))
+        except (TypeError, ValueError):
+            class_id = None
+
+        if not full_name or len(full_name) > 120:
+            flash('Enter the student?s full name (maximum 120 characters).', 'error')
+            return redirect(url_for('students'))
+
+        if not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', email):
+            flash('Enter a valid student email address.', 'error')
+            return redirect(url_for('students'))
+
+        if not phone or len(phone) > 40:
+            flash('Enter a valid student phone number.', 'error')
+            return redirect(url_for('students'))
+
+        if not admission_no or len(admission_no) > 50:
+            flash('Enter a valid admission number.', 'error')
+            return redirect(url_for('students'))
+
+        if len(guardian_contact) > 40:
+            flash('Guardian contact is too long.', 'error')
+            return redirect(url_for('students'))
+
+        if not reference or len(reference) > 100:
+            flash('Enter the payment reference.', 'error')
+            return redirect(url_for('students'))
+
+        if not re.fullmatch(r'\d+(?:\.\d{1,2})?', amount_text):
+            flash('Enter a valid payment amount in UGX.', 'error')
+            return redirect(url_for('students'))
+
+        amount = float(amount_text)
+        if amount <= 0:
+            flash('Payment amount must be greater than zero.', 'error')
+            return redirect(url_for('students'))
+
+        if len(password) < 8 or len(password) > 128:
+            flash('Temporary password must contain 8?128 characters.', 'error')
+            return redirect(url_for('students'))
+
+        db = get_db()
+
+        if not row("SELECT id FROM classes WHERE id = ?", (class_id,)):
+            flash('Select a valid class.', 'error')
+            return redirect(url_for('students'))
+
+        if row("SELECT id FROM users WHERE lower(email) = lower(?)", (email,)):
+            flash('That email address is already registered.', 'error')
+            return redirect(url_for('students'))
+
+        if row("SELECT user_id FROM student_profiles WHERE lower(admission_no) = lower(?)", (admission_no,)):
+            flash('That admission number is already in use.', 'error')
+            return redirect(url_for('students'))
+
+        if row("SELECT id FROM payments WHERE lower(reference) = lower(?)", (reference,)):
+            flash('That payment reference is already recorded.', 'error')
+            return redirect(url_for('students'))
+
+        try:
+            db.execute("""
+                INSERT INTO users
+                (full_name, email, phone, password_hash, role,
+                 is_active, must_change_password, created_at)
+                VALUES (?, ?, ?, ?, 'student', 0, 0, ?)
+            """, (
+                full_name,
+                email,
+                phone,
+                generate_password_hash(password),
+                now()
+            ))
+
+            student = row("SELECT id FROM users WHERE lower(email) = lower(?)", (email,))
+            student_id = student['id']
+
+            db.execute("""
+                INSERT INTO student_profiles
+                (user_id, class_id, admission_no, guardian_contact)
+                VALUES (?, ?, ?, ?)
+            """, (student_id, class_id, admission_no, guardian_contact or None))
+
+            db.execute("""
+                INSERT INTO payments
+                (student_id, amount, currency, reference, status,
+                 verified_by, verified_at)
+                VALUES (?, ?, 'UGX', ?, 'Pending', NULL, NULL)
+            """, (student_id, amount, reference))
+
+            db.commit()
+
+        except Exception:
+            db.rollback()
+            raise
+
+        audit(
+            current_user()['id'],
+            'student_registered',
+            'student',
+            str(student_id),
+            'Student account and pending payment created.'
+        )
+
+        flash('Student registered. Account remains inactive until payment approval.', 'success')
+        return redirect(url_for('students'))
+
     @app.post('/students/<int:student_id>/approve')
     @admin_required
     def approve_student(student_id):
-        db=get_db(); db.execute("UPDATE payments SET status='Approved/Paid',verified_by=?,verified_at=? WHERE student_id=?",(current_user()['id'],now(),student_id)); db.execute('UPDATE users SET is_active=1,must_change_password=1 WHERE id=?',(student_id,)); db.commit(); audit(current_user()['id'],'payment_approved','student',str(student_id)); flash('Payment approved and account activated. Student must change the temporary password.','success'); return redirect(url_for('students'))
+        db = get_db()
+
+        student = row(
+            "SELECT id FROM users WHERE id = ? AND role = 'student'",
+            (student_id,)
+        )
+
+        if not student:
+            flash('Student account was not found.', 'error')
+            return redirect(url_for('students'))
+
+        payment = row("""
+            SELECT id, status FROM payments
+            WHERE student_id = ?
+            ORDER BY id DESC LIMIT 1
+        """, (student_id,))
+
+        if not payment or payment['status'] != 'Pending':
+            flash('This student has no pending payment to approve.', 'error')
+            return redirect(url_for('students'))
+
+        db.execute("""
+            UPDATE payments
+            SET status = 'Approved/Paid', verified_by = ?, verified_at = ?
+            WHERE id = ? AND status = 'Pending'
+        """, (current_user()['id'], now(), payment['id']))
+
+        db.execute("""
+            UPDATE users
+            SET is_active = 1, must_change_password = 1
+            WHERE id = ? AND role = 'student'
+        """, (student_id,))
+
+        db.commit()
+
+        audit(
+            current_user()['id'],
+            'payment_approved',
+            'student',
+            str(student_id)
+        )
+
+        flash('Payment approved. Student can now log in and change the temporary password.', 'success')
+        return redirect(url_for('students'))
+
     @app.post('/students/<int:student_id>/suspend')
     @admin_required
     def suspend_student(student_id):
-        db=get_db(); db.execute('UPDATE users SET is_active=0 WHERE id=?',(student_id,)); db.commit(); audit(current_user()['id'],'account_suspended','student',str(student_id)); flash('Student account suspended.','success'); return redirect(url_for('students'))
+        db = get_db()
+        student = row(
+            "SELECT id FROM users WHERE id = ? AND role = 'student'",
+            (student_id,)
+        )
+
+        if not student:
+            flash('Student account was not found.', 'error')
+            return redirect(url_for('students'))
+
+        db.execute(
+            "UPDATE users SET is_active = 0 WHERE id = ?",
+            (student_id,)
+        )
+        db.commit()
+
+        audit(
+            current_user()['id'],
+            'account_suspended',
+            'student',
+            str(student_id)
+        )
+
+        flash('Student account suspended.', 'success')
+        return redirect(url_for('students'))
     @app.post('/announcements')
     @staff_required
     def create_announcement():
@@ -172,24 +382,88 @@ def create_app(test_config=None):
         if u['role']=='student': resources=rows('SELECT r.*,c.name class_name,s.name subject_name FROM resources r JOIN classes c ON c.id=r.class_id JOIN subjects s ON s.id=r.subject_id WHERE r.class_id=? AND r.archived=0 ORDER BY r.created_at DESC',(profile['class_id'],))
         else: resources=rows('SELECT r.*,c.name class_name,s.name subject_name,u.full_name uploader FROM resources r JOIN classes c ON c.id=r.class_id JOIN subjects s ON s.id=r.subject_id LEFT JOIN users u ON u.id=r.uploaded_by WHERE r.archived=0 ORDER BY r.created_at DESC')
         return render_template('library.html',resources=resources,profile=profile,requests=rows('SELECT dr.*,u.full_name,r.title FROM download_requests dr JOIN users u ON u.id=dr.student_id JOIN resources r ON r.id=dr.resource_id ORDER BY dr.id DESC') if u['role']=='admin' else [])
+    def resource_file_details(resource):
+        path = Path(app.config['UPLOAD_DIR']) / resource['filename']
+        if not path.is_file():
+            abort(404)
+
+        extension = path.suffix.lower()
+        title = (resource['title'] or '').strip() or path.stem
+
+        if Path(title).suffix.lower() != extension:
+            title = f'{title}{extension}'
+
+        mimetype = mimetypes.guess_type(path.name)[0] or 'application/octet-stream'
+        return path, title, mimetype
+
+    @app.get('/resource/<int:resource_id>/reader')
+    @role_required('admin','teacher','student')
+    def resource_reader(resource_id):
+        resource = row(
+            "SELECT r.*, c.name AS class_name, s.name AS subject_name "
+            "FROM resources r "
+            "JOIN classes c ON c.id = r.class_id "
+            "JOIN subjects s ON s.id = r.subject_id "
+            "WHERE r.id = ? AND r.archived = 0",
+            (resource_id,)
+        )
+
+        if not resource:
+            abort(404)
+
+        if current_user()['role'] == 'student':
+            assigned_student(class_id=resource['class_id'])
+
+        _, _, mimetype = resource_file_details(resource)
+
+        return render_template(
+            'resource_reader.html',
+            resource=resource,
+            mimetype=mimetype
+        )
+
     @app.get('/resource/<int:resource_id>/view')
     @role_required('admin','teacher','student')
     def view_resource(resource_id):
-        r=row('SELECT * FROM resources WHERE id=? AND archived=0',(resource_id,));
-        if not r: abort(404)
-        if current_user()['role']=='student': assigned_student(class_id=r['class_id'])
-        return send_file(Path(app.config['UPLOAD_DIR'])/r['filename'],as_attachment=False,download_name=r['title'])
+        r = row('SELECT * FROM resources WHERE id=? AND archived=0', (resource_id,))
+        if not r:
+            abort(404)
+        if current_user()['role'] == 'student':
+            assigned_student(class_id=r['class_id'])
+
+        path, display_name, mimetype = resource_file_details(r)
+        return send_file(
+            path,
+            mimetype=mimetype,
+            as_attachment=False,
+            download_name=display_name,
+            conditional=True
+        )
+
     @app.post('/downloads/<int:req_id>/<decision>')
     @admin_required
     def decide_download(req_id,decision):
         if decision not in {'approve','reject'}: abort(400)
         status='Approved' if decision=='approve' else 'Rejected'; expiry=(datetime.now(timezone.utc)+timedelta(days=2)).isoformat() if status=='Approved' else None; db=get_db(); db.execute('UPDATE download_requests SET status=?,decided_by=?,decided_at=?,expires_at=? WHERE id=?',(status,current_user()['id'],now(),expiry,req_id)); db.commit(); audit(current_user()['id'],f'download_{decision}','download_request',str(req_id)); flash(f'Download request {status.lower()}.','success'); return redirect(url_for('library'))
+
     @app.get('/resource/<int:resource_id>/download')
     @student_required
     def download_resource(resource_id):
-        r=row('SELECT * FROM resources WHERE id=?',(resource_id,)); assigned_student(class_id=r['class_id'] if r else -1); ok=row("SELECT * FROM download_requests WHERE student_id=? AND resource_id=? AND status='Approved' AND expires_at>=? ORDER BY id DESC LIMIT 1",(current_user()['id'],resource_id,now()))
-        if not r or not ok: abort(403)
-        return send_file(Path(app.config['UPLOAD_DIR'])/r['filename'],as_attachment=True,download_name=secure_filename(r['title']))
+        r = row('SELECT * FROM resources WHERE id=?', (resource_id,))
+        assigned_student(class_id=r['class_id'] if r else -1)
+        ok = row("SELECT * FROM download_requests WHERE student_id=? AND resource_id=? AND status='Approved' AND expires_at>=? ORDER BY id DESC LIMIT 1", (current_user()['id'], resource_id, now()))
+
+        if not r or not ok:
+            abort(403)
+
+        path, display_name, mimetype = resource_file_details(r)
+        return send_file(
+            path,
+            mimetype=mimetype,
+            as_attachment=True,
+            download_name=secure_filename(display_name),
+            conditional=True
+        )
     @app.route('/timetable',methods=['GET','POST'])
     @role_required('admin','teacher','student')
     def timetable():

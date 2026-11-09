@@ -6,3 +6,18 @@ __pycache__/
 instance/*.db
 instance/uploads/*
 !instance/.gitkeep
+
+# Database files and backups
+instance/*.db*
+instance/*.sqlite*
+instance/*.sqlite3*
+
+# Development backup files
+/app/*backup*
+/app/*.before-*
+/app/*.pre-*
+
+# Secrets
+.env
+.env.*
+!.env.example

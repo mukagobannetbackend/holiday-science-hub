@@ -39,6 +39,9 @@ class DatabaseConnection:
     def commit(self):
         self.connection.commit()
 
+    def rollback(self):
+        self.connection.rollback()
+
     def close(self):
         self.connection.close()
 
@@ -319,15 +322,9 @@ def init_db():
     )
     db.commit()
 
-    database_url = (
-        current_app.config.get("DATABASE_URL")
-        or os.getenv("DATABASE_URL")
-    )
+    seed_reference_data(db)
 
-    seed_enabled = current_app.config.get(
-        "SEED_DEMO_DATA",
-        not bool(database_url),
-    )
+    seed_enabled = current_app.config.get("SEED_DEMO_DATA", False)
 
     if seed_enabled:
         count = db.execute(
@@ -335,12 +332,10 @@ def init_db():
         ).fetchone()["user_count"]
 
         if count == 0:
-            seed(db)
+            seed_demo(db)
 
 
-def seed(db):
-    t = now()
-
+def seed_reference_data(db):
     classes = [
         (1, "O-Level", "S1"),
         (2, "O-Level", "S2"),
@@ -350,21 +345,36 @@ def seed(db):
         (6, "A-Level", "S6"),
     ]
 
-    db.executemany(
-        "INSERT INTO classes(id, level, name) VALUES(?,?,?)",
-        classes,
-    )
+    for class_id, level, name in classes:
+        existing = db.execute(
+            "SELECT id FROM classes WHERE name=?", (name,)
+        ).fetchone()
 
-    db.executemany(
-        "INSERT INTO subjects(name) VALUES(?)",
-        [(name,) for name in [
-            "Biology",
-            "Chemistry",
-            "Physics",
-            "Mathematics",
-            "Agriculture",
-        ]],
-    )
+        if not existing:
+            db.execute(
+                "INSERT INTO classes(id, level, name) VALUES(?,?,?)",
+                (class_id, level, name),
+            )
+
+    for name in [
+        "Biology",
+        "Chemistry",
+        "Physics",
+        "Mathematics",
+        "Agriculture",
+    ]:
+        existing = db.execute(
+            "SELECT id FROM subjects WHERE name=?", (name,)
+        ).fetchone()
+
+        if not existing:
+            db.execute("INSERT INTO subjects(name) VALUES(?)", (name,))
+
+    db.commit()
+
+
+def seed_demo(db):
+    t = now()
 
     accounts = [
         ("Hub Administrator", "admin@holidayhub.local",
