@@ -282,6 +282,24 @@ CREATE TABLE IF NOT EXISTS videos(
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS staff_profiles(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    full_name TEXT NOT NULL,
+    job_title TEXT NOT NULL DEFAULT '',
+    qualifications TEXT NOT NULL DEFAULT '',
+    institution TEXT NOT NULL DEFAULT '',
+    experience TEXT NOT NULL DEFAULT '',
+    bio TEXT NOT NULL DEFAULT '',
+    email TEXT NOT NULL DEFAULT '',
+    phone TEXT NOT NULL DEFAULT '',
+    whatsapp TEXT NOT NULL DEFAULT '',
+    photo_filename TEXT NOT NULL DEFAULT '',
+    display_order INTEGER NOT NULL DEFAULT 0,
+    is_published INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS audit_logs(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     actor_id INTEGER,

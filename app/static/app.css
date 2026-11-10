@@ -31,3 +31,129 @@
     .reader-controls{justify-content:flex-start;gap:7px}
     .pdf-reader{height:calc(100vh - 310px);min-height:420px;padding:10px}
 }
+
+
+/* MUKAGO GROUP MOVING FOOTER ADVERTISEMENT */
+.mukago-ad-footer {
+    width: 100%;
+    overflow: hidden;
+    margin-top: 36px;
+    padding: 13px 0 15px;
+    background: #171717;
+    color: #f4f0e7;
+    border-top: 2px solid #c99b45;
+    border-bottom: 1px solid rgba(201, 155, 69, .35);
+}
+
+.mukago-ad-heading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 9px;
+    padding: 0 12px 11px;
+    color: #e0b75f;
+    font-size: 12px;
+    font-weight: 800;
+    letter-spacing: 2px;
+}
+
+.mukago-ad-dot {
+    width: 7px;
+    height: 7px;
+    flex: 0 0 7px;
+    border-radius: 50%;
+    background: #e0b75f;
+    box-shadow: 0 0 9px #e0b75f;
+}
+
+.mukago-ad-label {
+    color: #bdb6a8;
+    font-size: 9px;
+    letter-spacing: 1px;
+}
+
+.mukago-ad-window {
+    width: 100%;
+    overflow: hidden;
+}
+
+.mukago-ad-track {
+    display: flex;
+    width: max-content;
+    animation: mukago-ad-scroll 28s linear infinite;
+}
+
+.mukago-ad-message {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 25px;
+    padding-right: 25px;
+    white-space: nowrap;
+    font-size: 13px;
+}
+
+.mukago-ad-message strong {
+    color: #e0b75f;
+    letter-spacing: 1.5px;
+}
+
+.mukago-ad-message a {
+    color: #f4d18b;
+    text-decoration: none;
+    font-weight: 700;
+}
+
+.mukago-ad-message a:hover {
+    text-decoration: underline;
+}
+
+.mukago-ad-star {
+    color: #e0b75f;
+}
+
+@keyframes mukago-ad-scroll {
+    from { transform: translateX(0); }
+    to { transform: translateX(-50%); }
+}
+
+@media (max-width: 600px) {
+    .mukago-ad-message {
+        gap: 17px;
+        font-size: 12px;
+    }
+
+    .mukago-ad-heading {
+        font-size: 11px;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .mukago-ad-track {
+        animation: none;
+    }
+}
+
+
+/* Public About Us and staff profiles */
+.public-about-link{display:inline-flex;align-items:center;margin-left:auto;padding:9px 15px;border:1px solid rgba(201,166,91,.45);border-radius:9px;color:var(--gold,#c9a65b);text-decoration:none;font-weight:700;white-space:nowrap}
+.public-about-link:hover{background:rgba(201,166,91,.10)}
+.about-hero{padding:30px;margin-bottom:26px;border:1px solid rgba(201,166,91,.25);border-radius:16px;background:linear-gradient(135deg,rgba(201,166,91,.12),rgba(255,255,255,.02))}
+.about-hero h1{margin:8px 0}
+.staff-profile-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:20px}
+.staff-profile-card{overflow:hidden;border:1px solid var(--border,rgba(255,255,255,.12));border-radius:15px;background:var(--panel,#17191d)}
+.staff-profile-photo{display:block;width:100%;height:245px;object-fit:cover;background:#24262b}
+.staff-profile-placeholder{display:grid;place-items:center;height:245px;background:rgba(201,166,91,.10);color:var(--gold,#c9a65b);font-size:3rem;font-weight:800}
+.staff-profile-content{padding:20px}
+.staff-profile-content h2{margin:0 0 5px}
+.staff-profile-content p{line-height:1.65}
+.staff-detail{margin-top:12px}
+.staff-detail strong{display:block;color:var(--gold,#c9a65b);font-size:.76rem;letter-spacing:.06em;text-transform:uppercase}
+.staff-contact{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}
+.staff-contact a{overflow-wrap:anywhere}
+.staff-admin-panel{margin-top:22px}
+.staff-current-photo{display:block;max-width:180px;max-height:180px;margin:10px 0;border-radius:12px;object-fit:cover}
+.staff-publish-option{display:flex;align-items:center;gap:10px}
+.staff-status{display:inline-block;padding:5px 9px;border-radius:20px;background:rgba(201,166,91,.12);font-size:.8rem}
+.form-actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+@media(max-width:600px){.about-hero{padding:20px}.public-about-link{margin-left:8px;padding:7px 10px}}

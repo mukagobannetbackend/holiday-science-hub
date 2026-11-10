@@ -838,6 +838,191 @@ def create_app(test_config=None):
             )
 
         return render_template('videos.html', videos=vs)
+
+    def staff_photo_folder():
+        folder = Path(app.config['UPLOAD_DIR']) / 'staff'
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    def save_staff_photo(upload):
+        if not upload or not upload.filename:
+            return None, None
+        original = secure_filename(upload.filename)
+        if '.' not in original:
+            return None, 'Choose a PNG, JPG, JPEG or WEBP image.'
+        extension = original.rsplit('.', 1)[-1].lower()
+        if extension not in {'png', 'jpg', 'jpeg', 'webp'}:
+            return None, 'Staff photos must be PNG, JPG, JPEG or WEBP files.'
+        upload.stream.seek(0, 2)
+        size = upload.stream.tell()
+        upload.stream.seek(0)
+        if size > 5 * 1024 * 1024:
+            return None, 'The staff photo must be 5 MB or smaller.'
+        filename = secrets.token_hex(12) + '.' + extension
+        upload.save(staff_photo_folder() / filename)
+        return filename, None
+
+    def remove_staff_photo(filename):
+        if filename:
+            safe_name = secure_filename(filename)
+            if safe_name == filename:
+                folder = staff_photo_folder().resolve()
+                photo_path = (folder / safe_name).resolve()
+                if photo_path.parent == folder and photo_path.is_file():
+                    photo_path.unlink()
+
+    @app.get('/about')
+    def about():
+        profiles = rows("""
+            SELECT * FROM staff_profiles
+            WHERE is_published = 1
+            ORDER BY display_order, full_name
+        """)
+        return render_template('about.html', profiles=profiles)
+
+    @app.get('/staff-photo/<filename>')
+    def staff_photo(filename):
+        safe_name = secure_filename(filename)
+        if not safe_name or safe_name != filename:
+            abort(404)
+        folder = staff_photo_folder().resolve()
+        photo_path = (folder / safe_name).resolve()
+        if photo_path.parent != folder or not photo_path.is_file():
+            abort(404)
+        content_type = mimetypes.guess_type(str(photo_path))[0] or 'application/octet-stream'
+        return send_file(photo_path, mimetype=content_type, conditional=True)
+
+    @app.get('/admin/staff')
+    @admin_required
+    def manage_staff():
+        profiles = rows("""
+            SELECT * FROM staff_profiles
+            ORDER BY display_order, full_name
+        """)
+        return render_template('manage_staff.html', profiles=profiles)
+
+    @app.route('/admin/staff/new', methods=['GET', 'POST'])
+    @admin_required
+    def add_staff():
+        if request.method == 'POST':
+            full_name = request.form.get('full_name', '').strip()
+            if not full_name or len(full_name) > 120:
+                flash('Enter a staff member name (maximum 120 characters).', 'error')
+                return redirect(url_for('add_staff'))
+
+            photo_filename, photo_error = save_staff_photo(request.files.get('photo'))
+            if photo_error:
+                flash(photo_error, 'error')
+                return redirect(url_for('add_staff'))
+
+            try:
+                display_order = int(request.form.get('display_order') or 0)
+            except ValueError:
+                display_order = 0
+
+            timestamp = now()
+            db = get_db()
+            db.execute("""
+                INSERT INTO staff_profiles
+                (full_name, job_title, qualifications, institution, experience, bio,
+                 email, phone, whatsapp, photo_filename, display_order,
+                 is_published, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                full_name,
+                request.form.get('job_title', '').strip()[:120],
+                request.form.get('qualifications', '').strip()[:1000],
+                request.form.get('institution', '').strip()[:180],
+                request.form.get('experience', '').strip()[:2000],
+                request.form.get('bio', '').strip()[:3000],
+                request.form.get('email', '').strip()[:180],
+                request.form.get('phone', '').strip()[:40],
+                request.form.get('whatsapp', '').strip()[:40],
+                photo_filename or '',
+                display_order,
+                1 if request.form.get('is_published') == 'on' else 0,
+                timestamp,
+                timestamp
+            ))
+            db.commit()
+            audit(current_user()['id'], 'create', 'staff_profile', '', full_name)
+            flash('Staff profile added successfully.', 'success')
+            return redirect(url_for('manage_staff'))
+
+        return render_template('staff_form.html', profile=None, page_heading='Add staff member')
+
+    @app.route('/admin/staff/<int:profile_id>/edit', methods=['GET', 'POST'])
+    @admin_required
+    def edit_staff(profile_id):
+        profile = row('SELECT * FROM staff_profiles WHERE id = ?', (profile_id,))
+        if not profile:
+            abort(404)
+
+        if request.method == 'POST':
+            full_name = request.form.get('full_name', '').strip()
+            if not full_name or len(full_name) > 120:
+                flash('Enter a staff member name (maximum 120 characters).', 'error')
+                return redirect(url_for('edit_staff', profile_id=profile_id))
+
+            photo_filename = profile['photo_filename'] or ''
+            new_photo, photo_error = save_staff_photo(request.files.get('photo'))
+            if photo_error:
+                flash(photo_error, 'error')
+                return redirect(url_for('edit_staff', profile_id=profile_id))
+            if new_photo:
+                photo_filename = new_photo
+
+            try:
+                display_order = int(request.form.get('display_order') or 0)
+            except ValueError:
+                display_order = 0
+
+            db = get_db()
+            db.execute("""
+                UPDATE staff_profiles SET
+                    full_name = ?, job_title = ?, qualifications = ?, institution = ?,
+                    experience = ?, bio = ?, email = ?, phone = ?, whatsapp = ?,
+                    photo_filename = ?, display_order = ?, is_published = ?, updated_at = ?
+                WHERE id = ?
+            """, (
+                full_name,
+                request.form.get('job_title', '').strip()[:120],
+                request.form.get('qualifications', '').strip()[:1000],
+                request.form.get('institution', '').strip()[:180],
+                request.form.get('experience', '').strip()[:2000],
+                request.form.get('bio', '').strip()[:3000],
+                request.form.get('email', '').strip()[:180],
+                request.form.get('phone', '').strip()[:40],
+                request.form.get('whatsapp', '').strip()[:40],
+                photo_filename,
+                display_order,
+                1 if request.form.get('is_published') == 'on' else 0,
+                now(),
+                profile_id
+            ))
+            db.commit()
+            if new_photo and profile['photo_filename']:
+                remove_staff_photo(profile['photo_filename'])
+            audit(current_user()['id'], 'update', 'staff_profile', str(profile_id), full_name)
+            flash('Staff profile updated successfully.', 'success')
+            return redirect(url_for('manage_staff'))
+
+        return render_template('staff_form.html', profile=profile, page_heading='Edit staff member')
+
+    @app.post('/admin/staff/<int:profile_id>/delete')
+    @admin_required
+    def delete_staff(profile_id):
+        profile = row('SELECT * FROM staff_profiles WHERE id = ?', (profile_id,))
+        if not profile:
+            abort(404)
+        db = get_db()
+        db.execute('DELETE FROM staff_profiles WHERE id = ?', (profile_id,))
+        db.commit()
+        remove_staff_photo(profile['photo_filename'])
+        audit(current_user()['id'], 'delete', 'staff_profile', str(profile_id), profile['full_name'])
+        flash('Staff profile deleted.', 'success')
+        return redirect(url_for('manage_staff'))
+
     @app.get('/audit')
     @admin_required
     def audit_page(): return render_template('audit.html',logs=rows('SELECT a.*,u.full_name actor FROM audit_logs a LEFT JOIN users u ON u.id=a.actor_id ORDER BY a.id DESC LIMIT 100'))
